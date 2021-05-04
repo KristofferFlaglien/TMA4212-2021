@@ -1,0 +1,300 @@
+"""
+Tools for task 4.
+"""
+
+# Importing libraries and plotting tools:
+import numpy as np
+import scipy.sparse
+import scipy.sparse.linalg
+import scipy.integrate
+import scipy.interpolate
+import matplotlib.pyplot as plt
+#from Tools.plotting_tools import *
+
+
+# Korteweg-deVries equation tools (forward euler, crank-nicolson):
+from plotting_tools import set_ax
+
+
+def disc_norm(v):
+    return np.sqrt(np.sum(v ** 2) / len(v))
+
+class KdVEq:
+    def __init__(self, init_m, n):
+
+        """
+        :param init_m: initial gridsize in x-space.
+        :param n: gridsize in t-space.
+        """
+
+        # Setting up the initial discretization parameters.
+        self.M = [init_m]
+        self.N = n
+
+        # Making grids.
+        self.x_grid = [np.linspace(-1, 1, self.M[0] + 1)[1:]]
+        self.t_grid = np.linspace(0, 1, self.N + 2)
+
+        # Starts in 0th iteration (needs calculations).
+        self.solution = []              # U(x, t=1)-vector in a given iteration.
+        self.rel_error = []  # Average relative error between numerical and analytical solutions.
+        self.disc_norm = np.zeros(self.N+2)
+
+
+
+    def forward_euler_solver(self, init_c, iteration):
+        # Number of non-boundary points.
+        M = self.M[iteration]
+        N = self.N
+
+        # Discretization steps for the uniform grid.
+        h = self.x_grid[iteration][1] - self.x_grid[iteration][0]
+        k = self.t_grid[1] - self.t_grid[0]
+        u = np.zeros(shape = (len(self.x_grid[iteration]), len(self.t_grid)))
+
+        a = (1 + np.pi ** 2) * k / (2 * h) - 3 * k / (8 * h ** 3)
+        b = k / (8 * h ** 3)
+
+        # Initial condition U(x, 0).
+        u[:,0] = init_c(self.x_grid[iteration])
+        self.disc_norm[0] = disc_norm(u[:,0])
+
+        # Evolving the system to the final state.
+        for i in range(1,N+2):
+            for j in range(M):
+                # Updating the solution at each point in x-space.
+                u[j][i] = u[j][i-1] + a * (u[j - 1][i-1] - u[(j + 1) % M][i-1]) + b * (u[j - 3][i-1] - u[(j + 3) % M][i-1])
+
+
+            self.disc_norm[i] = disc_norm(u[:,i])
+
+        # Saving the solution data.
+        self.solution.append(u[:,-1])
+
+        print('Solution', iteration + 1, 'found.')
+
+    def crank_nicolson_solver(self, init_c, iteration):
+        # Number of non-boundary points.
+        M = self.M[iteration]
+        N = self.N
+
+        # Discretization steps for the uniform grid.
+        h = self.x_grid[iteration][1] - self.x_grid[iteration][0]
+        k = self.t_grid[1] - self.t_grid[0]
+
+        a = (1 + np.pi ** 2) * k / (4 * h) - 3 * k / (16 * h ** 3)
+        b = k / (16 * h ** 3)
+
+        # Creating the right hand side D-matrix.
+        rhs_diagonals = [-a, -b, b, a, 1, -a, -b, b, a]
+        rhs_positions = [-M + 1, -M + 3, -3, -1, 0, 1, 3, M - 3, M - 1]
+        D = scipy.sparse.diags(rhs_diagonals, rhs_positions, shape=(M, M)).toarray()
+
+        # Creating the left hand side A-matrix.
+        lhs_diagonals = [a, b, -b, -a, 1, a, b, -b, -a]
+        lhs_positions = [-M + 1, -M + 3, -3, -1, 0, 1, 3, M - 3, M - 1]
+        A = scipy.sparse.diags(lhs_diagonals, lhs_positions, shape=(M, M)).toarray()
+
+        # Making the A-matrix sparse.
+        A = scipy.sparse.csr_matrix(A)
+
+        # Initial condition U(x, 0).
+        u = np.zeros(shape=(len(self.x_grid[iteration]), len(self.t_grid)))
+        # u = init_c(self.x_grid[iteration])
+        u[:,0] = init_c(self.x_grid[iteration])
+        self.disc_norm[0] = disc_norm(u[:,0])
+
+        # Evolving the system to the final state.
+        for i in range(1,N + 2):
+            # rhs = np.dot(D, u)
+            rhs = np.dot(D,u[:,i-1])
+            u[:,i] = scipy.sparse.linalg.spsolve(A, rhs.transpose())
+            self.disc_norm[i] = disc_norm(u[:,i])
+
+
+        # Saving the solution data.
+        self.solution.append(u[:,-1])
+
+        print('Solution', iteration + 1, 'found.')
+
+    def get_error(self, u, iteration):
+        # Defining the discrete l2 norm.
+
+
+        # Finding the discrete solutions for the given iteration for the l2 norm.
+        x_disc = self.x_grid[iteration]
+        U_disc = self.solution[iteration]
+        u_disc = u(x_disc, 1)
+
+        # Finding the relative errors using the l2 and L2 norms respectively.
+        error_disc = disc_norm(u_disc - U_disc) / disc_norm(u_disc)
+
+        # Saving the error data in the relative error list.
+        self.rel_error.append(error_disc)
+
+
+
+    def check_convergence(self, iterations, u, solver, init_c):
+
+        # Finding the l2 error of the initial system.
+        solver(init_c, 0)
+        self.get_error(u, 0)
+
+        # Calculating the l2 errors of a few more iterations of the system.
+        for i in range(1, iterations):
+
+            # Doubling the size of the x-grid.
+            self.M.append(2 * self.M[i - 1])
+            M = self.M[i]
+            self.x_grid.append(np.linspace(-1, 1, M + 1)[1:])
+
+            # Solving for the new system.
+            solver(init_c, i)
+            self.get_error(u, i)
+
+    def save_data(self, data_title):
+        iterations = len(self.M)
+        data = np.zeros(shape=(2 + iterations, self.M[-1]))
+        data[0, :iterations] = self.M
+        data[1, :iterations] = self.rel_error
+        for i in range(iterations):
+            solution = self.solution[i]
+            data[2 + i, :len(solution)] = solution
+
+        filename = 'References/' + data_title
+
+        # noinspection PyTypeChecker
+        np.savetxt(fname=filename, X=data, fmt='%s')
+
+        print('Data has been saved.')
+
+    def load_data(self, data_title, iterations):
+        data = np.loadtxt('References/' + data_title)
+
+        self.M = data[0, :iterations].astype(int)
+        self.rel_error = data[1, :iterations]
+        for i in range(iterations):
+            self.solution.append(data[2 + i, :self.M[i]])
+
+        print('Data has been loaded.')
+
+    def plot_convergence(self, line_order=2):
+        disc_error = self.rel_error
+        M_array = np.linspace(self.M[0], self.M[-1], 1000)
+
+        def line(x, order, init_error):
+            return init_error * x**(-order) / (x[0])**(-order)
+
+        print('M-values:', self.M)
+        print('disc error:', disc_error)
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111)
+        set_ax(ax,
+               title='Convergence testing for the Korteweg-deVries equation',
+               xscale='log', yscale='log',
+               x_label='M', y_label='Relative error')
+
+        ax.plot(self.M, disc_error, marker='o', label=r'$l_2$ norm error', lw=3, c='#1F77B4')
+        ax.plot(M_array, line(M_array, line_order, disc_error[0]), label=r'$O(h^{%s})$' % line_order,
+                lw=3, ls='--', c='orange')
+
+        ax.legend(fontsize=15)
+        plt.show()
+        plt.close()
+
+    def plot_solution_comparison(self, u, step_jumps=1, suptitle='Solution to the Korteweg-deVries equation'):
+        fig, axes = plt.subplots(nrows=2, ncols=3, figsize=(8, 8))
+        fig.suptitle('\n'+suptitle, fontsize=20)
+
+        step = 0
+
+        for ax in axes.flat:
+            step += step_jumps
+            ax.set_title('Step ' + str(step) + ': M = ' + str(self.M[step - 1]) + ', N = ' + str(self.N), fontsize=15)
+            x_disc = np.linspace(-3, 3, 3 * self.M[step - 1])
+            x_cont = np.linspace(-3, 3, 1000)
+            U = np.tile(self.solution[step - 1], 3)
+            if step == step_jumps:
+                ax.plot(x_disc, U, label='Numerical solution', lw=3)
+                ax.plot(x_cont, u(x_cont, 1), label='Analytical solution', ls='--', lw=3)
+            else:
+                ax.plot(x_disc, U, lw=3)
+                ax.plot(x_cont, u(x_cont, 1), ls='--', lw=3)
+
+        plt.subplots_adjust(0.1, 0.1, 0.90, 0.80, 0.35, 0.35)
+        fig.legend(fontsize=15, bbox_to_anchor=(0, -0.05, 1, 1))
+        plt.show()
+        plt.close()
+
+
+    def plot_convergence_time(self):
+        disc_error = self.disc_norm
+        N_array = np.linspace(0, self.N, self.N +2 )
+
+
+
+        print('M-values:', self.M)
+        print('disc error:', disc_error)
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111)
+        set_ax(ax,
+               title='Discrete l2 Norm over time for the Korteweg-deVries equation',
+               x_label='time', xscale = "log", y_label='l2 norm')
+
+        plt.ylim(0,1)
+
+        ax.plot(N_array, disc_error, marker='o', label=r' Discrete $l_2$ norm', lw=3, c='#1F77B4')
+        #ax.plot(N_array, label=r'$O(h^{%s})$' % line_order,
+                #lw=3, ls='--', c='#1F77B4')
+
+        ax.legend(fontsize=15)
+        plt.show()
+        plt.close()
+
+
+
+
+
+
+# Initial conditions for tasks 4b and 4c:
+
+
+
+def init_c_4b(x):
+    return np.sin(np.pi * x)
+
+def init_c_4c(x):
+    return np.cos(np.pi*x)
+
+
+
+
+# Analytical solution for tasks 4b and 4c:
+
+def u_4b(x, t):
+    return np.sin(np.pi * (x - t))
+
+def u_4c(x,t):
+    return np.cos(np.pi * (x - t))
+
+
+
+#Vi får problemer med stabilitiet når vi øker antall punkter i x-retning på Euler
+#l2 feilen for Euler endres litt etter hvert, og endringen blir mindre jo større man velger t
+#Virker som om CN er stabil, og det stemmer at l2 feilen er lik for all t.
+
+
+System = KdVEq(20, 50000)
+#System.check_convergence(1, u_4c, System.forward_euler_solver, init_c_4c)
+System.check_convergence(5,u_4b,System.forward_euler_solver,init_c_4b)
+#disc_error = System.rel_error
+#System.plot_convergence()
+#rint(disc_error)
+#rrs = System.disc_error
+#print(errs)
+#print(errs[0])
+#print(max(errs))
+
+System.plot_convergence_time()
